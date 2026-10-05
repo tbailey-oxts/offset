@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#c11722">
+  <title>Offset</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Wix+Madefor+Display:wght@600;700&family=Wix+Madefor+Text:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="style.css?v=0.21">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Offset</h1>
+    <div id="banner" class="banner" role="alert" hidden></div>
+    <div id="update" class="update" role="status" hidden></div>
+
+    <section id="idle" class="panel">
+      <div class="seg" role="radiogroup" aria-label="Measurement mode">
+        <button type="button" id="modeSingle" class="seg-btn" role="radio" aria-checked="true" data-mode="single">Single move</button>
+        <button type="button" id="modeLoop" class="seg-btn" role="radio" aria-checked="false" data-mode="loop">Loop (there and back)</button>
+      </div>
+      <div class="seg-row" id="pointsRow" hidden>
+        <span class="seg-label" id="pointsLabel">Points to visit</span>
+        <div class="seg" role="radiogroup" aria-labelledby="pointsLabel">
+          <button type="button" class="seg-btn" role="radio" aria-checked="true" data-points="1">1</button>
+          <button type="button" class="seg-btn" role="radio" aria-checked="false" data-points="2">2</button>
+          <button type="button" class="seg-btn" role="radio" aria-checked="false" data-points="3">3</button>
+        </div>
+      </div>
+      <div id="sessModeAsk" class="sess-confirm" role="alertdialog" hidden></div>
+      <details id="howto" class="howto"><summary>How to measure</summary>
+      <ol class="steps" id="stepsLoop" hidden></ol>
+      <ol class="steps" id="stepsSingle">
+        <li>Place the phone <b>flat</b> and line it up against a straight edge (table edge, box, ruler), with the <b>top of the phone</b> pointing the way you want to call <b>+Y</b>.</li>
+        <li>Press <b>Start</b> and keep it <b>completely still</b> until the button turns red.</li>
+        <li>Move smoothly, ideally in under 5&nbsp;s. For a long or awkward route, stop part-way (e.g. on the door sill) and hold the phone completely still until the green <b>✓ Checkpoint</b> tick appears (about a second): each checkpoint resets the drift.</li>
+        <li>Stop just above the destination, then set it down <b>gently</b>. Don't let it knock onto the surface.</li>
+        <li>Leave it still for ~2&nbsp;s, then press <b>Stop</b>.</li>
+      </ol>
+      </details>
+      <div id="calStatus" class="calstat"></div>
+    </section>
+
+    <section id="calRoutine" class="panel calr" hidden></section>
+
+    <section id="calib" class="panel" hidden>
+      <div id="calibMsg" class="big">Hold still…</div>
+      <div class="bar"><div id="calibBar"></div></div>
+      <div id="calibNote" class="note" hidden></div>
+    </section>
+
+    <section id="rec" class="panel" hidden>
+      <div id="modeBadge" class="mode-badge" hidden>Loop mode</div>
+      <div id="recStatus" class="big status">Moving…</div>
+      <div class="stats"><span>Time <b id="recTime">0.0 s</b></span><span>Rate <b id="recRate">– Hz</b></span></div>
+      <div id="cpBox" class="cp" aria-live="polite">
+        <div id="cpMsg" class="cp-msg">&nbsp;</div>
+        <div class="bar cp-bar"><div id="cpBar"></div></div>
+        <div id="cpCount" class="cp-count">Checkpoints: 0</div>
+      </div>
+      <div id="recNote" class="note" hidden></div>
+    </section>
+
+    <button id="main" class="main" type="button">Start</button>
+
+    <section id="result" hidden>
+      <div class="panel">
+        <div class="rows-label" id="rowsLabel" hidden>Start → far point</div>
+        <div class="rows" id="rows"></div>
+        <div id="survey" hidden>
+          <div class="rows-label">From start (INS cradle) to each point</div>
+          <table class="cmp-table survey-table" id="surveyTable"></table>
+          <div class="cmp-unit">mm (X right, Y forward, Z up)</div>
+          <ul class="baselines" id="baselines"></ul>
+          <p class="cmp-note">Check the point-to-point distances against a tape measure.</p>
+        </div>
+        <div id="single" hidden>
+          <div class="rows-label">Loop closure vs single move</div>
+          <table class="cmp-table" id="singleTable"></table>
+          <div class="cmp-unit">mm (X right, Y forward, Z up)</div>
+          <p class="cmp-note">Same recording processed both ways — record in Loop mode to compare.</p>
+        </div>
+        <div class="compare" id="compare"></div>
+        <div class="total" id="total"></div>
+        <div class="badge-line"><span id="badge" class="badge">good</span></div>
+        <ul id="warnings" class="warnings"></ul>
+        <button id="sessAdd" class="primary" type="button" hidden>Add to session</button>
+        <dl id="details" class="details"></dl>
+      </div>
+      <section id="contrib" class="panel contrib" hidden>
+        <h2>Contribute this run</h2>
+        <p id="contribOff" class="contrib-hint" hidden>Contributions aren't switched on yet</p>
+        <form id="contribForm" autocomplete="off" hidden>
+          <p class="contrib-hint">Sends the raw sensor recording and the details below to the Offset developers to help improve accuracy. No location, name or account is collected; an anonymous device ID links your runs.</p>
+          <fieldset class="contrib-ref">
+            <legend>Reference measurement (optional)</legend>
+            <div class="contrib-xyz" id="refSingle">
+              <label>X<input id="refX" type="number" inputmode="decimal" step="any" placeholder="mm"></label>
+              <label>Y<input id="refY" type="number" inputmode="decimal" step="any" placeholder="mm"></label>
+              <label>Z<input id="refZ" type="number" inputmode="decimal" step="any" placeholder="mm"></label>
+            </div>
+            <div id="refMulti" class="contrib-multi" hidden></div>
+            <label class="contrib-field">Method
+              <select id="refMethod">
+                <option value="tape">Tape measure</option>
+                <option value="laser">Laser</option>
+                <option value="estimate">Estimate</option>
+              </select>
+            </label>
+            <p class="contrib-hint">If you measured the real distance, enter it — these runs are the most useful.</p>
+          </fieldset>
+          <label class="contrib-field">Route
+            <input id="contribRoute" type="text" maxlength="120" placeholder="e.g. boot to roof">
+          </label>
+          <label class="contrib-field">Notes
+            <textarea id="contribNotes" rows="2" maxlength="2000"></textarea>
+          </label>
+          <label class="contrib-check"><input id="contribFlagged" type="checkbox"> This run went wrong (e.g. bumped, wrong spot)</label>
+          <label class="contrib-check"><input id="contribAgree" type="checkbox"> I agree to send this run</label>
+          <button id="contribSubmit" class="secondary" type="submit" disabled>Submit</button>
+          <div id="contribStatus" class="contrib-status" aria-live="polite"></div>
+          <div id="contribQueue" class="contrib-hint" hidden></div>
+        </form>
+      </section>
+      <div class="panel viz">
+        <div id="legend" class="legend" hidden>
+          <span><i class="sw" style="background:var(--accent)"></i>Gyro</span>
+          <span><i class="sw" style="background:#e040fb"></i>Phone fusion</span>
+        </div>
+        <div id="view3d" class="view3d"></div>
+        <div class="plots">
+          <figure><canvas id="plotTop"></canvas><figcaption>Top view (X → , Y ↑)</figcaption></figure>
+          <figure><canvas id="plotSide"></canvas><figcaption>Side view (Y → , Z ↑)</figcaption></figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="session" class="panel session" hidden>
+      <h2 id="sessTitle">Session</h2>
+      <div id="sessBody"></div>
+    </section>
+
+    <section class="tools">
+      <button id="dl" class="secondary" type="button" disabled>Download raw data (CSV)</button>
+      <label class="secondary filebtn">Load CSV<input id="csv" type="file" accept=".csv,text/csv,text/plain"></label>
+    </section>
+    <p id="version" class="version">version …</p>
+  </main>
+  <script type="module">
+    // version.json is fetched uncached, and every module URL carries its version, so a new
+    // release is always picked up even while GitHub Pages lets the browser cache files.
+    let info = { version: 'dev-' + Date.now(), date: '' };
+    try {
+      const r = await fetch('version.json', { cache: 'no-store' });
+      if (r.ok) info = await r.json();
+    } catch { /* offline: load uncached */ }
+    window.APP_VERSION = info.version;
+    document.getElementById('version').textContent = `version ${info.version}` + (info.date ? ` · ${info.date}` : '');
+    await import(`./app.js?v=${encodeURIComponent(info.version)}`);
+  </script>
+</body>
+</html>

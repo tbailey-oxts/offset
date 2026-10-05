@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>IMU processing tests</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:16px;background:#fff;color:#111}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;font-variant-numeric:tabular-nums}
+.PASS{color:#0a7d2c;font-weight:bold}.FAIL{color:#c00;font-weight:bold}.INFO{color:#666;font-weight:bold}
+#summary{margin:12px 0;font-weight:bold}
+</style></head><body>
+<h2>IMU processing test harness</h2>
+<div id="summary">running...</div>
+<table><thead><tr><th>Case</th><th>Expected (mm)</th><th>Got (mm)</th><th>Error per axis (mm)</th><th>Tolerance</th><th>Extra</th><th>Result</th></tr></thead><tbody id="rows"></tbody></table>
+<script type="module">
+// Cache-busted so edits to the modules are always picked up on reload.
+const v = Date.now();
+const { processRecording, singleFromLoop } = await import(`../processing.js?v=${v}`);
+const { generate, generateSensorCal, G } = await import(`./synth.js?v=${v}`);
+
+const REAL = { accNoise: 0.02, accBias: [0.02, -0.015, 0.03], gyroNoise: 0.002, gyroBias: [0.003, -0.002, 0.004] };
+const D0 = [-0.02, 1.5, 0.75];
+const mm = (v) => v.map((x) => (x * 1000).toFixed(1)).join(', ');
+const results = [];
+const f1 = (x) => x.toFixed(1);
+
+function run(opts) {
+  const g = generate(opts);
+  const r = processRecording(g.calibSamples, g.samples, opts.proc);
+  const D = g.opts.D;
+  const err = r.delta.map((x, i) => Math.abs(x - D[i]) * 1000);
+  return { g, r, D, err };
+}
+function add(row) {
+  results.push(row);
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${row.name}</td><td>${row.expected}</td><td>${row.got}</td><td>${row.errText}</td><td>${row.tol}</td><td>${row.extra || ''}</td><td class="${row.status}">${row.status}</td>`;
+  document.getElementById('rows').appendChild(tr);
+}
+function single(name, opts, tolMm, extraCheck) {
+  const { r, D, err } = run(opts);
+  const max = Math.max(...err);
+  let ok = max < tolMm, extra = `tilt ${r.tiltCorrectionDeg?.toFixed(2)}deg, quality=${r.quality.level}`;
+  if (extraCheck) { const e = extraCheck(r); ok = ok && e.ok; extra += '; ' + e.text; }
+  add({ name, expected: mm(D), got: mm(r.delta), err: err.map(Number), errText: err.map(f1).join(', '),
+        tol: `< ${tolMm} mm`, extra, status: ok ? 'PASS' : 'FAIL' });
+}
+function multi(name, opts, tolMm, seeds = 10) {
+  const errs = [];
+  let worst = null;
+  for (let s = 1; s <= seeds; s++) {
+    const x = run({ ...opts, seed: s });
+    errs.push(x.err);
+    if (!worst || Math.max(...x.err) > Math.max(...worst.err)) worst = x;
+  }
+  const mean = [0, 1, 2].map((k) => errs.reduce((a, e) => a + e[k], 0) / errs.length);
+  const max = [0, 1, 2].map((k) => Math.max(...errs.map((e) => e[k])));
+  const ok = tolMm == null ? null : Math.max(...max) < tolMm;
+  add({ name: `${name} (${seeds} seeds)`, expected: mm(worst.D), got: `worst seed: ${mm(worst.r.delta)}`,
+        err: max, mean, errText: `mean ${mean.map(f1).join(', ')} | max ${max.map(f1).join(', ')}`,
+        tol: tolMm == null ? 'report only' : `max < ${tolMm} mm`,
+        extra: `worst-seed quality ${worst.r.quality.level}`, status: ok == null ? 'INFO' : ok ? 'PASS' : 'FAIL' });
+}
+
+try {
+  // generator self-checks
+  {
+    const g = generate({ moveSec: 2, rotDeg: 45, pitchDeg: 30 });
+    const v = [0, 0, 0], p = [0, 0, 0]; const dt = 1e-4;
+    for (let t = 0; t < g.moveEnd + 1; t += dt) { const a = g.truth(t).aw; for (let k = 0; k < 3; k++) { v[k] += a[k] * dt; p[k] += v[k] * dt; } }
+    const e = p.map((x, i) => Math.abs(x - g.opts.D[i]) * 1000);
+    add({ name: 'GEN: double-integrate a_world == D', expected: mm(g.opts.D), got: mm(p), errText: e.map(f1).join(', '), err: e, tol: '< 0.5 mm', status: Math.max(...e) < 0.5 ? 'PASS' : 'FAIL' });
+    const rest = (pitch) => generate({ pitchDeg: pitch }).samples[0];
+    const a0 = rest(0), a90 = rest(90), a30 = rest(30);
+    const ok = Math.abs(a0.az - G) < 1e-9 && Math.abs(a0.ax) < 1e-9 && Math.abs(a90.ay - G) < 1e-9 && Math.abs(a90.az) < 1e-9
+      && Math.abs(Math.hypot(a30.ax, a30.ay, a30.az) - G) < 1e-9 && Math.abs(a30.ay - G * Math.sin(Math.PI / 6)) < 1e-9;
+    add({ name: 'GEN: rest f_dev = +g on up axis', expected: 'flat az=g; pitch90 ay=g', got: `flat (${a0.ax.toFixed(2)},${a0.ay.toFixed(2)},${a0.az.toFixed(2)}) p90 (${a90.ax.toFixed(2)},${a90.ay.toFixed(2)},${a90.az.toFixed(2)})`, errText: '-', tol: '1e-9', status: ok ? 'PASS' : 'FAIL' });
+    const gg = generate({ moveSec: 2, rotDeg: 45, rotAxis: [1, 1, 0.3] });
+    const ths = gg.truth(gg.moveEnd + 0.5).q, th0 = gg.truth(0).q;
+    const ang = 2 * Math.acos(Math.min(1, Math.abs(ths[0] * th0[0] + ths[1] * th0[1] + ths[2] * th0[2] + ths[3] * th0[3]))) * 180 / Math.PI;
+    add({ name: 'GEN: total rotation = 45 deg', expected: '45.00', got: ang.toFixed(2), errText: Math.abs(ang - 45).toFixed(3) + ' deg', tol: '< 0.01', status: Math.abs(ang - 45) < 0.01 ? 'PASS' : 'FAIL' });
+    // gyro consistency: integrate omega numerically -> final angle
+    let th = 0; for (let t = 0; t < gg.moveEnd + 1; t += 1e-4) th += Math.hypot(...gg.truth(t).omega) * 1e-4;
+    th *= 180 / Math.PI;
+    add({ name: 'GEN: integral of |omega| = 45 deg', expected: '45.00', got: th.toFixed(2), errText: Math.abs(th - 45).toFixed(3) + ' deg', tol: '< 0.01', status: Math.abs(th - 45) < 0.01 ? 'PASS' : 'FAIL' });
+  }
+
+  single('1 Ideal flat 100Hz', { D: D0 }, 5);
+  single('2 Ideal pitch30 + rot45 about (1,1,0.3)', { D: D0, pitchDeg: 30, rotDeg: 45, rotAxis: [1, 1, 0.3] }, 10);
+  single('3 Upright (pitch 90) ideal', { D: D0, pitchDeg: 90 }, 10, (r) => ({ ok: r.cal.forwardAxis === 'back', text: `forwardAxis=${r.cal.forwardAxis}` }));
+  multi('4 Realistic S23 100Hz, rot30, move 3s', { ...REAL, D: D0, rotDeg: 30, moveSec: 3 }, 60);
+  multi('5 Realistic 60Hz +-20% jitter', { ...REAL, D: D0, rotDeg: 30, moveSec: 3, rate: 60, jitter: 0.2 }, 80);
+  { // 6 slow
+    const seeds = 5, out = [];
+    for (let s = 1; s <= seeds; s++) out.push(run({ ...REAL, D: D0, rotDeg: 30, moveSec: 8, seed: s }));
+    const max = [0, 1, 2].map((k) => Math.max(...out.map((x) => x.err[k])));
+    const mean = [0, 1, 2].map((k) => out.reduce((a, x) => a + x.err[k], 0) / seeds);
+    const levels = out.map((x) => x.r.quality.level);
+    const ok = levels.every((l) => l !== 'good');
+    add({ name: '6 Slow move 8s realistic (5 seeds)', expected: mm(D0), got: mm(out[0].r.delta) + ' (seed1)', errText: `mean ${mean.map(f1).join(', ')} | max ${max.map(f1).join(', ')}`,
+          err: max, mean, tol: 'report; quality != good', extra: `levels: ${levels.join(',')}`, status: ok ? 'INFO' : 'FAIL' });
+  }
+  { // 7 no movement
+    const errsAll = []; let still = true;
+    for (let s = 1; s <= 5; s++) {
+      const g = generate({ ...REAL, D: [0, 0, 0], moveSec: 2, seed: s });
+      const r = processRecording(g.calibSamples, g.samples);
+      errsAll.push(r.delta.map((x) => Math.abs(x) * 1000)); still = still && r.still === true;
+    }
+    const max = [0, 1, 2].map((k) => Math.max(...errsAll.map((e) => e[k])));
+    add({ name: '7 No movement, realistic (5 seeds)', expected: '0, 0, 0', got: '(max abs) ' + max.map(f1).join(', '), errText: max.map(f1).join(', '), err: max, tol: '< 5 mm & still===true', extra: `still=${still}`, status: (Math.max(...max) < 5 && still) ? 'PASS' : 'FAIL' });
+  }
+  { // 8 short end hold
+    const g = generate({ ...REAL, D: D0, rotDeg: 30, moveSec: 3, postHold: 0.2 });
+    const r = processRecording(g.calibSamples, g.samples);
+    const err = r.delta.map((x, i) => Math.abs(x - D0[i]) * 1000);
+    const w = r.quality.warnings.find((x) => /not held still/i.test(x));
+    add({ name: '8 Short end hold 0.2s realistic', expected: mm(D0), got: mm(r.delta), errText: err.map(f1).join(', '), err, tol: 'report; warning "not held still"', extra: `warnings: ${JSON.stringify(r.quality.warnings)}`, status: w ? 'INFO' : 'FAIL' });
+  }
+  multi('9a Vertical lift D=(0,0,0.5) realistic', { ...REAL, D: [0, 0, 0.5], rotDeg: 30, moveSec: 3 }, 60);
+  multi('9b Sideways D=(0.8,0,0) realistic', { ...REAL, D: [0.8, 0, 0], rotDeg: 30, moveSec: 3 }, 60);
+  // Real-phone errors: accel/gyro scale factors make rotated gravity leave ~0.1–0.3 m/s² of
+  // residual once the phone has turned, which must not be mistaken for motion at the end hold.
+  const SCALE = { accScale: [1.012, 0.988, 1.015], gyroScale: [1.02, 0.985, 1.01] };
+  multi('10a Boot->roof, scale errors, rot90, 4s', { ...REAL, ...SCALE, D: [0.05, 0.25, 0.6], rotDeg: 90, rotAxis: [1, 0.2, 0.1], moveSec: 4 }, 80);
+  multi('10b Long reach, scale errors, rot60, 4s', { ...REAL, ...SCALE, D: D0, rotDeg: 60, moveSec: 4 }, 100);
+  // Chrome-on-S23 conditions from a real recording: ~54 Hz, 0.1 rounding, start buzz, Stop tap.
+  const PHONE = { ...REAL, ...SCALE, rate: 54, jitter: 0.2, quantize: true, startBump: true, stopTap: true };
+  multi('11a Floor->table, S23 Chrome artifacts', { ...PHONE, D: [0.05, 0.4, 0.6], rotDeg: 40, moveSec: 3 }, 80);
+  multi('11b Boot->roof, S23 Chrome artifacts', { ...PHONE, D: [0.05, 0.25, 0.6], rotDeg: 90, rotAxis: [1, 0.2, 0.1], moveSec: 4 }, 100);
+  // Phone-fusion orientation mode (both quaternion conventions), with bigger gyro scale errors
+  // that the app's own gyro integration can't see but the phone's fusion has calibrated out.
+  const BADGYRO = { ...PHONE, gyroScale: [1.04, 0.96, 1.03], fused: true, fusedErrDeg: 0.1 };
+  multi('12a Fused orientation, convention A', { ...BADGYRO, D: [0.8, 0.8, 0.8], rotDeg: 60, moveSec: 4, proc: { orientation: 'fused' } }, 80);
+  multi('12b Fused orientation, convention B', { ...BADGYRO, fusedConvention: 'B', D: [0.8, 0.8, 0.8], rotDeg: 60, moveSec: 4, proc: { orientation: 'fused' } }, 80);
+  multi('12c Same data, gyro mode (for comparison)', { ...BADGYRO, D: [0.8, 0.8, 0.8], rotDeg: 60, moveSec: 4 }, 1e9);
+  // Native Android app: 400 Hz, unrounded, low noise, still with start bump and Stop tap.
+  const NATIVE = { ...REAL, ...SCALE, accNoise: 0.012, gyroNoise: 0.001, rate: 400, jitter: 0.05, startBump: true, stopTap: true, fused: true, fusedErrDeg: 0.1 };
+  multi('13a Native 400 Hz, 800 mm route', { ...NATIVE, D: [0.8, 0.8, 0.8], rotDeg: 60, moveSec: 4 }, 60);
+  multi('13b Native 400 Hz, fused orientation', { ...NATIVE, D: [0.8, 0.8, 0.8], rotDeg: 60, moveSec: 4, proc: { orientation: 'fused' } }, 60);
+  multi('13c Native 400 Hz, slow sideways slide', { ...NATIVE, D: [0.5, 0, 0], rotDeg: 0, moveSec: 4 }, 60);
+  // Multi-stage: a long reach like the car route B (2.3 m in ~9 s) done in one go vs with a
+  // still pause part-way. Accel bias that changes with orientation makes the long move drift.
+  const LONG = { ...NATIVE, accScale: [1.02, 0.98, 1.025], gyroScale: [1.03, 0.97, 1.02] };
+  const legs = [{ D: [0.25, 1.1, 0.6], moveSec: 4, rotDeg: 50 }, { D: [0.23, 1.1, 0.3], moveSec: 4, rotDeg: 40 }];
+  multi('14a Long reach in one go (for comparison)', { ...LONG, segments: legs.map((l) => ({ ...l, pause: 0 })) }, 1e9);
+  multi('14b Long reach with 1 s pause part-way', { ...LONG, segments: [{ ...legs[0], pause: 1.0 }, legs[1]] }, 60);
+  multi('14c Three legs with pauses', { ...LONG, segments: [{ ...legs[0], pause: 1.0 }, { D: [0, 0.4, 0.2], moveSec: 2, rotDeg: 20, pause: 1.2 }, legs[1]] }, 80);
+  multi('14d Pause too short to split (0.5 s)', { ...NATIVE, segments: [{ D: [0.3, 0.5, 0.4], moveSec: 3, rotDeg: 30, pause: 0.5 }, { D: [0.2, 0.3, 0.2], moveSec: 3, rotDeg: 20 }] }, 80);
+  // Loop closure: out to the far point, hold, back to the exact start. Scored on the far point.
+  const FAR = [0.48, 2.2, 0.9];
+  const back = (D) => D.map((x) => -x);
+  const LOOP = { ...LONG, truthD: FAR, proc: { loop: true } };
+  multi('15a One-way 6 s reach, no loop (for comparison)', { ...LONG, segments: [{ D: FAR, moveSec: 6, rotDeg: 50 }] }, 1e9);
+  multi('15b Same reach as a loop, 6 s each way', { ...LOOP, segments: [{ D: FAR, moveSec: 6, rotDeg: 50, pause: 1.5 }, { D: back(FAR), moveSec: 6, rotDeg: -50 }] }, 80);
+  multi('15c Loop with a pause on the way out (ignored)', { ...LOOP, segments: [{ D: [0.2, 1.0, 0.5], moveSec: 3, rotDeg: 25, pause: 1.0 }, { D: [0.28, 1.2, 0.4], moveSec: 3, rotDeg: 25, pause: 2.0 }, { D: back(FAR), moveSec: 6, rotDeg: -50 }] }, 80);
+  {
+    // Put back 0.2 m off the start and turned 8 degrees: the loop can't close properly, so it must warn.
+    const g = generate({ ...LOOP, rotAxis: [0, 0, 1], seed: 3, segments: [{ D: FAR, moveSec: 5, rotDeg: 30, pause: 1.5 }, { D: [-0.48, -2.0, -0.9], moveSec: 5, rotDeg: -22 }] });
+    const r = processRecording(g.calibSamples, g.samples, { loop: true });
+    const w = r.quality.warnings.join(' | ');
+    const ok = /turned/.test(w) && /missed by/.test(w);
+    add({ name: '15d Loop returned off-spot and turned: warns', expected: 'turned + missed warnings', got: `gap ${Math.round(r.loop.gapMm)} mm, heading ${r.loop.headingOffDeg.toFixed(1)} deg`, errText: '-', err: [0, 0, 0], tol: 'warnings present', extra: w, status: ok ? 'PASS' : 'FAIL' });
+  }
+  {
+    // Survey: INS -> antenna 1 -> antenna 2 -> INS. Both points and the baseline between them are scored.
+    const A1 = [0.55, 1.05, 0.95], A2 = [-0.55, 1.05, 0.95];
+    const legs = (seed) => [
+      { D: A1, moveSec: 4, rotDeg: 40, pause: 1.5 },
+      { D: A2.map((x, k) => x - A1[k]), moveSec: 3, rotDeg: -20, pause: 1.5 },
+      { D: A2.map((x) => -x), moveSec: 5, rotDeg: -20 },
+    ];
+    let worstPt = [0, 0, 0], worstBase = 0, ok = true, n = 0;
+    for (let seed = 1; seed <= 10; seed++) {
+      const g = generate({ ...LONG, segments: legs(seed), seed });
+      const r = processRecording(g.calibSamples, g.samples, { loop: true, points: 2 });
+      if (!r.loop || r.loop.points.length !== 2) { ok = false; continue; }
+      n++;
+      [A1, A2].forEach((T, j) => r.loop.points[j].forEach((x, k) => { worstPt[k] = Math.max(worstPt[k], Math.abs(x - T[k]) * 1000); }));
+      worstBase = Math.max(worstBase, Math.abs(r.loop.baselines[0].mm - 1100));
+    }
+    // Simulation achieves ~35 mm worst axis with the survey defaults (vs ~300 mm with the
+    // single/loop defaults), so hold it well inside the +/-150 mm target. Baseline held tight.
+    ok = ok && n === 10 && Math.max(...worstPt) < 80 && worstBase < 60;
+    add({ name: '16a Survey, 2 antennas, 3 legs (10 seeds)', expected: 'A1 550/1050/950, A2 -550/1050/950, baseline 1100', got: `${n}/10 runs found 2 points`, errText: `worst point axis ${worstPt.map(f1).join(', ')} | worst baseline ${f1(worstBase)}`, err: worstPt, tol: 'points < 80 mm, baseline < 60 mm', extra: '', status: ok ? 'PASS' : 'FAIL' });
+  }
+  {
+    // Survey expecting 2 points but only 1 hold made: uses what it found and warns.
+    const g = generate({ ...LONG, seed: 4, segments: [{ D: [0.5, 1.0, 0.9], moveSec: 4, rotDeg: 30, pause: 1.5 }, { D: [-0.5, -1.0, -0.9], moveSec: 4, rotDeg: -30 }] });
+    const r = processRecording(g.calibSamples, g.samples, { loop: true, points: 2 });
+    const ok = r.loop && r.loop.points.length === 1 && r.quality.warnings.some((w) => /2 points were expected/.test(w));
+    add({ name: '16b Survey expecting 2 points, only 1 hold: warns', expected: '1 point + warning', got: `${r.loop ? r.loop.points.length : 0} point(s)`, errText: '-', err: [0, 0, 0], tol: 'warning present', extra: r.quality.warnings.join(' | '), status: ok ? 'PASS' : 'FAIL' });
+  }
+  {
+    // Session statistics: five runs plus one obvious outlier.
+    const S = await import(`../session.js?v=${v}`);
+    const runs = [[500, 2250, 860], [510, 2262, 855], [495, 2249, 862], [505, 2270, 858], [490, 2255, 866], [700, 2400, 700]]
+      .map((p, i) => ({ id: `r${i}`, points: [p] }));
+    const sum = S.summarize(runs);
+    const ax = sum.points[0];
+    const meanOk = Math.abs(ax[0].mean - 500) < 0.01 && Math.abs(ax[1].mean - 2257.2) < 0.01;
+    const ciOk = Math.abs(ax[0].ci95 - 2.78 * Math.sqrt(62.5) / Math.sqrt(5)) < 0.01;          // SD of 500,510,495,505,490 = sqrt(62.5)
+    const sugOk = Math.abs(ax[2].suggested - Math.hypot(ax[2].ci95, S.SYSTEMATIC_MM[2])) < 1e-9;
+    const ok = sum.outliers.length === 1 && sum.outliers[0] === 'r5' && sum.used.length === 5 && meanOk && ciOk && sugOk
+      && S.summarize(runs, { include: ['r5'] }).used.length === 6 && S.summarize(runs.slice(0, 2)).outliers.length === 0;
+    add({ name: '17a Session stats: outlier, mean, 95% CI, suggested accuracy', expected: 'r5 flagged; mean 500/2257.2; CI t(4)', got: `outliers ${sum.outliers.join(',')}, mean ${ax.map((a) => a.mean.toFixed(1)).join('/')}, ci ${ax.map((a) => a.ci95.toFixed(1)).join('/')}`, errText: '-', err: [0, 0, 0], tol: 'exact', extra: S.summaryText(sum, () => 'result'), status: ok ? 'PASS' : 'FAIL' });
+  }  {
+    // Sensor calibration: six faces + two flat turns with known scale/bias errors. The fit must
+    // recover them (true = raw x gain, so gain x scale = 1), to within the g-constant difference.
+    const SC = await import(`../sensorcal.js?v=${v}`);
+    const truth = { accScale: [1.02, 0.985, 1.01], accBias: [0.1, -0.15, 0.2], gyroScale: [1.015, 0.99, 1.02], gyroBias: [0.003, -0.002, 0.004] };
+    let worstA = 0, worstG = 0, worstB = 0, okAll = true;
+    for (let seed = 1; seed <= 3; seed++) {
+      const r = SC.fitSensorCal(generateSensorCal({ ...truth, seed }));
+      if (!r.ok) { okAll = false; continue; }
+      r.accGain.forEach((k, i) => { worstA = Math.max(worstA, Math.abs(k * truth.accScale[i] - 1) * 100); });
+      r.gyroGain.forEach((k, i) => { worstG = Math.max(worstG, Math.abs(k * truth.gyroScale[i] - 1) * 100); });
+      r.accBias.forEach((b, i) => { worstB = Math.max(worstB, Math.abs(b - truth.accBias[i])); });
+    }
+    const missing = SC.fitSensorCal(generateSensorCal({ ...truth, turns: [] }));
+    const ok = okAll && worstA < 0.1 && worstG < 0.05 && worstB < 0.01 && !missing.ok && /turn/.test(missing.errors.join(' '));
+    add({ name: '18a Sensor calibration fit (3 seeds)', expected: 'accel gain < 0.1 %, gyro gain < 0.05 %, bias < 0.01', got: `accel ${worstA.toFixed(3)} %, gyro ${worstG.toFixed(3)} %, bias ${worstB.toFixed(4)}`, errText: '-', err: [0, 0, 0], tol: 'as expected; no-turn run rejected', extra: missing.errors.join(' | '), status: ok ? 'PASS' : 'FAIL' });
+  }
+  {
+    // End to end: the 6 s one-way reach (15a) on a phone with scale errors, with and without the
+    // calibration from the routine above.
+    const SC = await import(`../sensorcal.js?v=${v}`);
+    const errs = { accScale: LONG.accScale, gyroScale: LONG.gyroScale, accBias: LONG.accBias || [0, 0, 0], gyroBias: LONG.gyroBias || [0, 0, 0] };
+    const sc = SC.fitSensorCal(generateSensorCal({ ...errs, seed: 9 }));
+    const worst = { off: [0, 0, 0], on: [0, 0, 0] };
+    for (let seed = 1; seed <= 10; seed++) {
+      const g = generate({ ...LONG, seed, segments: [{ D: FAR, moveSec: 6, rotDeg: 50 }] });
+      for (const [k, o] of [['off', {}], ['on', { sensorCal: sc }]]) {
+        const d = processRecording(g.calibSamples, g.samples, o).delta;
+        d.forEach((x, i) => { worst[k][i] = Math.max(worst[k][i], Math.abs(x - FAR[i]) * 1000); });
+      }
+    }
+    const ok = sc.ok && Math.max(...worst.on) < 0.5 * Math.max(...worst.off);
+    add({ name: '18b 6 s reach with phone scale errors: calibration on vs off', expected: 'worst error at least halved', got: `off ${worst.off.map(f1).join('/')} → on ${worst.on.map(f1).join('/')}`, errText: worst.on.map(f1).join(', '), err: worst.on, tol: 'on < 0.5 × off', extra: '', status: ok ? 'PASS' : 'FAIL' });
+  }
+
+  {
+    // Loop mode but no hold at the far point: falls back with a warning.
+    const g = generate({ ...LOOP, segments: [{ D: FAR, moveSec: 5, rotDeg: 30, pause: 0 }, { D: back(FAR), moveSec: 5, rotDeg: -30 }] });
+    const r = processRecording(g.calibSamples, g.samples, { loop: true });
+    const ok = r.loop === null && r.quality.warnings.some((x) => /no hold at the far point/.test(x));
+    add({ name: '15e Loop mode without a far-point hold: warns', expected: 'loop null + warning', got: `loop ${r.loop === null ? 'null' : 'set'}`, errText: '-', err: [0, 0, 0], tol: 'warning present', extra: r.quality.warnings.join(' | '), status: ok ? 'PASS' : 'FAIL' });
+  }  {
+    // A loop run cut at the far point and processed as a single move: should match the uncorrected
+    // outbound leg and still land on the far point (it just lacks the loop's drift correction).
+    let worst = [0, 0, 0], worstRaw = 0, n = 0;
+    for (let seed = 1; seed <= 5; seed++) {
+      const g = generate({ ...LOOP, seed, segments: [{ D: FAR, moveSec: 4, rotDeg: 30, pause: 1.5 }, { D: back(FAR), moveSec: 4, rotDeg: -30 }] });
+      const L = processRecording(g.calibSamples, g.samples, { loop: true });
+      const S = singleFromLoop(g.calibSamples, g.samples, L);
+      if (!S) continue;
+      n++;
+      S.delta.forEach((x, k) => { worst[k] = Math.max(worst[k], Math.abs(x - FAR[k]) * 1000); worstRaw = Math.max(worstRaw, Math.abs(x - L.loop.raw[k]) * 1000); });
+    }
+    const ok = n === 5 && Math.max(...worst) < 150 && worstRaw < 30;
+    add({ name: '15f Loop run re-processed as a single move (5 seeds)', expected: `far point ${FAR.map((x) => x * 1000).join('/')}`, got: `${n}/5 processed; worst gap to uncorrected leg ${f1(worstRaw)} mm`, errText: worst.map(f1).join(', '), err: worst, tol: '< 150 mm; within 30 mm of raw leg', extra: '', status: ok ? 'PASS' : 'FAIL' });
+  }
+
+  {
+    const errsAll = []; let still = true;
+    for (let s = 1; s <= 5; s++) {
+      const g = generate({ ...NATIVE, D: [0, 0, 0], seed: s, stopTap: false, startBump: false });
+      const r = processRecording(g.calibSamples, g.samples);
+      errsAll.push(r.delta.map((x) => Math.abs(x) * 1000)); still = still && r.still === true;
+    }
+    const max = [0, 1, 2].map((k) => Math.max(...errsAll.map((e) => e[k])));
+    add({ name: '13d Native 400 Hz, no movement (5 seeds)', expected: '0, 0, 0', got: '(max abs) ' + max.map(f1).join(', '), errText: max.map(f1).join(', '), err: max, tol: '< 5 mm & still===true', extra: `still=${still}`, status: (Math.max(...max) < 5 && still) ? 'PASS' : 'FAIL' });
+  }
+} catch (e) {
+  add({ name: 'EXCEPTION', expected: '', got: String((e && e.stack) || e), errText: '', tol: '', status: 'FAIL' });
+}
+
+const pass = results.filter((r) => r.status === 'PASS').length, fail = results.filter((r) => r.status === 'FAIL').length, info = results.filter((r) => r.status === 'INFO').length;
+document.getElementById('summary').textContent = `${pass} PASS, ${fail} FAIL, ${info} INFO (of ${results.length})`;
+window.testResults = { pass, fail, info, total: results.length, results };
+window.testsDone = true;
+</script></body></html>
